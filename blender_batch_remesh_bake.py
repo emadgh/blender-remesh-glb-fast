@@ -1,4 +1,4 @@
-"""Batch GLB remesh, UV unwrap, PBR bake and export. Blender 4.3+.
+"""Batch GLB remesh, UV unwrap, PBR bake and FBX export for Unity URP. Blender 4.3+.
 
 Run: blender -b --python blender_batch_remesh_bake.py -- --input DIR --output DIR
 """
@@ -26,7 +26,6 @@ def args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--input", required=True, type=Path, help="GLB file or folder")
     p.add_argument("--output", required=True, type=Path)
-    p.add_argument("--format", choices=("glb", "fbx", "both"), default="glb")
     p.add_argument("--texture-size", type=int, default=1024)
     p.add_argument("--voxel-size", type=float, default=0.005,
                    help="Fraction of each object's longest local dimension")
@@ -50,8 +49,8 @@ def activate(*objects, active=None):
     bpy.context.view_layer.objects.active = active or objects[-1]
 
 
-def image(name, size, fill, noncolor=False):
-    img = bpy.data.images.new(name, width=size, height=size, alpha=True)
+def image(name, size, fill, noncolor=False, alpha=True):
+    img = bpy.data.images.new(name, width=size, height=size, alpha=alpha)
     img.generated_color = fill
     if noncolor:
         img.colorspace_settings.name = "Non-Color"
@@ -93,8 +92,56 @@ def emission_copy(original, channel):
                 emit.inputs["Color"].default_value = value
     else:
         emit.inputs["Color"].default_value = default
+    # Bake the Principled emission's effective value, including Strength.
+    # Ignoring a zero strength turns the default white Emission Color into a
+    # full-white emissive map and makes the exported model look white.
+    if channel == "emission" and shader:
+        strength = shader.inputs.get("Emission Strength")
+        if strength:
+            if strength.is_linked:
+                tree.links.new(strength.links[0].from_socket, emit.inputs["Strength"])
+            else:
+                emit.inputs["Strength"].default_value = strength.default_value
     tree.links.new(emit.outputs["Emission"], output.inputs["Surface"])
     return mat
+
+
+def material_has_transparency(mat):
+    shader = principal(mat)
+    alpha = shader.inputs.get("Alpha") if shader else None
+    if not alpha:
+        return False
+    if alpha.is_linked:
+        return True
+    return float(alpha.default_value) < 0.999
+
+
+def bake_coverage(source, low, img, extrusion):
+    """Bake a white surface mask so empty atlas pixels stay fully opaque."""
+    original_slots = list(source.data.materials)
+    mask_mat = bpy.data.materials.new("__BakeCoverage")
+    mask_mat.use_nodes = True
+    tree = mask_mat.node_tree
+    tree.nodes.clear()
+    out = tree.nodes.new("ShaderNodeOutputMaterial")
+    emit = tree.nodes.new("ShaderNodeEmission")
+    emit.inputs["Color"].default_value = (1, 1, 1, 1)
+    tree.links.new(emit.outputs["Emission"], out.inputs["Surface"])
+    source.data.materials.clear()
+    for _ in (original_slots or [None]):
+        source.data.materials.append(mask_mat)
+    tex = low.active_material.node_tree.nodes.get("BAKE_TARGET")
+    tex.image = img
+    low.active_material.node_tree.nodes.active = tex
+    activate(source, low, active=low)
+    try:
+        bpy.ops.object.bake(type="EMIT", use_selected_to_active=True,
+                            cage_extrusion=extrusion, margin=8, use_clear=True)
+    finally:
+        source.data.materials.clear()
+        for original in original_slots:
+            source.data.materials.append(original)
+        bpy.data.materials.remove(mask_mat)
 
 
 def remesh(source, a):
@@ -152,9 +199,12 @@ def bake_map(source, low, originals, channel, img, extrusion):
                 bpy.data.materials.remove(copy)
 
 
-def material_from_images(imgs):
-    mat = bpy.data.materials.new("Baked PBR")
+def material_from_images(imgs, transparent):
+    mat = bpy.data.materials.new("Baked URP Lit")
     mat.use_nodes = True
+    # Blender 4.3 defaults new materials to HASHED transparency. Explicitly
+    # mark opaque inputs as opaque so FBX/Unity does not import them translucent.
+    mat.blend_method = "BLEND" if transparent else "OPAQUE"
     tree = mat.node_tree
     tree.nodes.clear()
     out = tree.nodes.new("ShaderNodeOutputMaterial")
@@ -169,15 +219,15 @@ def material_from_images(imgs):
 
     base = tex("basecolor")
     tree.links.new(base.outputs["Color"], bsdf.inputs["Base Color"])
-    tree.links.new(base.outputs["Alpha"], bsdf.inputs["Alpha"])
-    pixels = imgs["basecolor"].pixels
-    if any(pixels[i] < 0.999 for i in range(3, len(pixels), 4)):
+    if transparent:
+        tree.links.new(base.outputs["Alpha"], bsdf.inputs["Alpha"])
         mat.surface_render_method = "DITHERED"
-    orm = tex("orm")
-    separate = tree.nodes.new("ShaderNodeSeparateColor")
-    tree.links.new(orm.outputs["Color"], separate.inputs["Color"])
-    tree.links.new(separate.outputs["Green"], bsdf.inputs["Roughness"])
-    tree.links.new(separate.outputs["Blue"], bsdf.inputs["Metallic"])
+    # Keep grayscale maps directly connected to the Principled inputs. This
+    # lets FBX export preserve their texture links as individual material maps.
+    rough = tex("roughness")
+    tree.links.new(rough.outputs["Color"], bsdf.inputs["Roughness"])
+    metal = tex("metallic")
+    tree.links.new(metal.outputs["Color"], bsdf.inputs["Metallic"])
     normal = tex("normal")
     normal_map = tree.nodes.new("ShaderNodeNormalMap")
     tree.links.new(normal.outputs["Color"], normal_map.inputs["Color"])
@@ -185,44 +235,44 @@ def material_from_images(imgs):
     emission = tex("emission")
     tree.links.new(emission.outputs["Color"], bsdf.inputs["Emission Color"])
     bsdf.inputs["Emission Strength"].default_value = 1.0
-    # Exporter recognizes the unconnected glTF Material Output group's Occlusion input.
-    group = bpy.data.node_groups.get("glTF Material Output")
-    if group is None:
-        group = bpy.data.node_groups.new("glTF Material Output", "ShaderNodeTree")
-        group.interface.new_socket(name="Occlusion", in_out="INPUT", socket_type="NodeSocketColor")
-    hook = tree.nodes.new("ShaderNodeGroup")
-    hook.node_tree = group
-    tree.links.new(orm.outputs["Color"], hook.inputs["Occlusion"])
     return mat
 
 
-def pack_channels(imgs, size):
+def pack_unity_channels(imgs, size, transparent):
     count = size * size
     def values(key):
         data = array('f', [0.0]) * (count * 4)
         imgs[key].pixels.foreach_get(data)
         return data
     base = values("basecolor")
-    alpha = values("alpha")
-    ao = values("ao")
+    alpha = values("alpha") if transparent else None
+    coverage = values("coverage") if transparent else None
     rough = values("roughness")
     metal = values("metallic")
     for i in range(count):
         j = i * 4
-        base[j + 3] = alpha[j]
+        if transparent:
+            # Bake margin fills texels around UV islands; for all remaining
+            # empty atlas pixels use alpha=1 so the whole material is not
+            # classified as transparent by glTF/FBX importers.
+            base[j + 3] = alpha[j] if coverage[j] > 0.5 else 1.0
+        else:
+            base[j + 3] = 1.0
     imgs["basecolor"].pixels.foreach_set(base)
-    orm = image("orm", size, (1, 0.5, 0, 1), True)
+    ao = values("ao")
+    unity_mask = image("unity_metallic_smoothness", size, (0, 1, 0, 0.5), True)
     pixels = array('f', [0.0]) * (count * 4)
     for i in range(count):
         j = i * 4
-        pixels[j] = ao[j]
-        pixels[j + 1] = rough[j]
-        pixels[j + 2] = metal[j]
-        pixels[j + 3] = 1.0
-    orm.pixels.foreach_set(pixels)
-    imgs["orm"] = orm
-    for key in ("alpha", "ao", "roughness", "metallic"):
-        bpy.data.images.remove(imgs.pop(key))
+        pixels[j] = metal[j]
+        pixels[j + 1] = ao[j]
+        pixels[j + 2] = 0.0
+        pixels[j + 3] = 1.0 - rough[j]
+    unity_mask.pixels.foreach_set(pixels)
+    imgs["unity_metallic_smoothness"] = unity_mask
+    if transparent:
+        for key in ("alpha", "coverage"):
+            bpy.data.images.remove(imgs.pop(key))
 
 
 def process_file(path, a):
@@ -241,6 +291,7 @@ def process_file(path, a):
         if source.data.users > 1:
             source.data = source.data.copy()
         originals = [m if m else bpy.data.materials.new("empty_slot") for m in source.data.materials]
+        transparent = any(material_has_transparency(mat) for mat in originals)
         # Unassigned material slots still need a source material during channel baking.
         if not originals:
             blank = bpy.data.materials.new("default")
@@ -256,37 +307,37 @@ def process_file(path, a):
         safe_name = source.name.replace('/', '_').replace(chr(92), '_')
         prefix = f"{index:03d}_{safe_name}"
         imgs = {}
-        for key in (*CHANNELS, "ao", "normal"):
+        bake_keys = ["basecolor", "roughness", "metallic", "emission", "ao", "normal"]
+        if transparent:
+            bake_keys.append("alpha")
+        for key in bake_keys:
             fill = CHANNELS[key][1] if key in CHANNELS else ((1, 1, 1, 1) if key == "ao" else (0.5, 0.5, 1, 1))
-            img = image(prefix + "_" + key, a.texture_size, fill, key not in ("basecolor", "emission"))
+            img = image(prefix + "_" + key, a.texture_size, fill,
+                        key not in ("basecolor", "emission"),
+                        alpha=(transparent or key != "basecolor"))
             bake_map(source, low, originals, key, img, dimension * a.cage_extrusion)
             imgs[key] = img
-            # GLB is self-contained; sidecar PNGs are only needed by FBX workflows.
-            if a.format in ("fbx", "both"):
+            if key != "coverage":
                 save_image(img, out / f"{prefix}_{key}.png")
-        pack_channels(imgs, a.texture_size)
-        if a.format in ("fbx", "both"):
-            save_image(imgs["basecolor"], out / f"{prefix}_basecolor.png")
-            save_image(imgs["orm"], out / f"{prefix}_orm.png")
+        if transparent:
+            coverage = image(prefix + "_coverage", a.texture_size, (0, 0, 0, 0), True)
+            bake_coverage(source, low, coverage, dimension * a.cage_extrusion)
+            imgs["coverage"] = coverage
+        pack_unity_channels(imgs, a.texture_size, transparent)
+        # Re-save base color after alpha was made opaque outside UV islands.
+        save_image(imgs["basecolor"], out / f"{prefix}_basecolor.png")
+        save_image(imgs["unity_metallic_smoothness"],
+                   out / f"{prefix}_unity_metallic_smoothness.png")
         low.data.materials.clear()
-        low.data.materials.append(material_from_images(imgs))
+        low.data.materials.append(material_from_images(imgs, transparent))
         lows.append(low)
         report["objects"].append({"name": source.name, "source_faces": len(source.data.polygons),
-                                  "output_faces": len(low.data.polygons), "texture_prefix": prefix})
+                                  "output_faces": len(low.data.polygons), "texture_prefix": prefix,
+                                  "transparent": transparent})
     activate(*lows)
-    if a.format in ("glb", "both"):
-        # Pack image datablocks before export so the GLB exporter always reads
-        # their pixels from Blender and writes them into the GLB BIN chunk.
-        for img in bpy.data.images:
-            if img.source == "GENERATED" and not img.packed_file:
-                img.pack()
-        bpy.ops.export_scene.gltf(filepath=str(out / (path.stem + "_remeshed.glb")),
-                                  export_format="GLB", use_selection=True,
-                                  export_animations=False, export_image_format="AUTO")
-    if a.format in ("fbx", "both"):
-        bpy.ops.export_scene.fbx(filepath=str(out / (path.stem + "_remeshed.fbx")),
-                                 use_selection=True, path_mode="RELATIVE", embed_textures=False,
-                                 bake_anim=False)
+    bpy.ops.export_scene.fbx(filepath=str(out / (path.stem + "_remeshed.fbx")),
+                             use_selection=True, path_mode="RELATIVE", embed_textures=False,
+                             bake_anim=False)
     (out / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 
 

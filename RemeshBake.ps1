@@ -1,12 +1,12 @@
 Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase,System.Windows.Forms
 
 $xaml = @'
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Title="GLB Remesh + Bake" Height="730" Width="850" MinHeight="650" MinWidth="720" WindowStartupLocation="CenterScreen" Background="#F5F5F4" FontFamily="Segoe UI">
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Title="GLB to FBX • Remesh + Bake" Height="730" Width="850" MinHeight="650" MinWidth="720" WindowStartupLocation="CenterScreen" Background="#F5F5F4" FontFamily="Segoe UI">
   <Grid Margin="22">
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="220"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
     <StackPanel Grid.Row="0" Margin="0,0,0,14">
-      <TextBlock Text="GLB Remesh + Bake" FontSize="25" FontWeight="SemiBold" Foreground="#171717"/>
-      <TextBlock Text="فایل‌های GLB را اینجا رها کنید، تنظیمات را انتخاب کنید و شروع را بزنید." FontSize="13" Foreground="#555" Margin="0,5,0,0" FlowDirection="RightToLeft" HorizontalAlignment="Left"/>
+      <TextBlock Text="GLB → FBX  |  Remesh + Bake" FontSize="25" FontWeight="SemiBold" Foreground="#171717"/>
+      <TextBlock Text="فایل‌های GLB را اینجا رها کنید؛ خروجی FBX و تکسچرهای مناسب Unity کنار هم ساخته می‌شوند." FontSize="13" Foreground="#555" Margin="0,5,0,0" FlowDirection="RightToLeft" HorizontalAlignment="Left"/>
     </StackPanel>
     <Border Grid.Row="1" BorderBrush="#B5B5B0" BorderThickness="1" CornerRadius="8" Background="White" AllowDrop="True" Name="DropArea">
       <DockPanel Margin="12">
@@ -36,7 +36,6 @@ $xaml = @'
         <StackPanel Width="145" Margin="0,0,12,8"><TextBlock Text="Voxel size (%)"/><TextBox Name="VoxelSize" Text="0.5"/></StackPanel>
         <StackPanel Width="145" Margin="0,0,12,8"><TextBlock Text="Decimate (%)"/><TextBox Name="Decimate" Text="100"/></StackPanel>
         <StackPanel Width="145" Margin="0,0,12,8"><TextBlock Text="Cage extrusion (%)"/><TextBox Name="Cage" Text="2"/></StackPanel>
-        <StackPanel Width="120" Margin="0,0,0,8"><TextBlock Text="Export"/><ComboBox Name="Format" SelectedIndex="0"><ComboBoxItem Content="glb"/><ComboBoxItem Content="fbx"/><ComboBoxItem Content="both"/></ComboBox></StackPanel>
       </WrapPanel>
       <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
         <Button Name="Start" Content="▶  Remesh + Bake" Padding="20,10" Background="#222" Foreground="White" BorderThickness="0" FontWeight="SemiBold"/>
@@ -51,7 +50,7 @@ $xaml = @'
 
 $reader = [System.Xml.XmlNodeReader]::new([xml]$xaml)
 $window = [Windows.Markup.XamlReader]::Load($reader)
-$names = 'DropArea','FilesList','AddFiles','RemoveFiles','ClearFiles','OutputPath','BrowseOutput','BlenderPath','BrowseBlender','TextureSize','VoxelSize','Decimate','Cage','Format','Start','Cancel','Status','Log'
+$names = 'DropArea','FilesList','AddFiles','RemoveFiles','ClearFiles','OutputPath','BrowseOutput','BlenderPath','BrowseBlender','TextureSize','VoxelSize','Decimate','Cage','Start','Cancel','Status','Log'
 foreach ($name in $names) { Set-Variable -Name $name -Value $window.FindName($name) -Scope Script }
 
 $script:queue = [System.Collections.Generic.List[string]]::new()
@@ -177,8 +176,7 @@ $Start.Add_Click({
     $script:runFolder = Join-Path $OutputPath.Text ("remesh_logs_" + (Get-Date -Format 'yyyyMMdd_HHmmss'))
     [IO.Directory]::CreateDirectory($script:runFolder) | Out-Null
     $size = $TextureSize.SelectedItem.Content
-    $format = $Format.SelectedItem.Content
-    $script:arguments = @('--texture-size', $size, '--voxel-size', $voxel.ToString($culture), '--decimate-ratio', $decimate.ToString($culture), '--cage-extrusion', $cage.ToString($culture), '--format', $format)
+    $script:arguments = @('--texture-size', $size, '--voxel-size', $voxel.ToString($culture), '--decimate-ratio', $decimate.ToString($culture), '--cage-extrusion', $cage.ToString($culture))
     $script:current = 0; $script:failCount = 0
     $Start.IsEnabled = $false; $Cancel.IsEnabled = $true
     $Log.Clear()
