@@ -10,6 +10,10 @@ Windows GUI for batch remeshing GLB files with Blender 4.3+. Drop GLB files into
 
 The GUI uses the default Blender 4.3 install path when available; select `blender.exe` manually otherwise. See [README-fa.md](README-fa.md) for Persian instructions and processing limitations.
 
+## Direct GLB → FBX converter
+
+For conversion without remesh or baking, use the separate `Launch GLB to FBX.vbs` launcher. It preserves the imported mesh/UV/material structure, writes material images beside each FBX, and exports relative texture links. See [README-glb-to-fbx-fa.md](README-glb-to-fbx-fa.md).
+
 ## Output textures
 
 Each remeshed mesh gets its own UV map and texture set:
