@@ -1,4 +1,4 @@
-"""Convert GLB files to Unity-friendly FBX files without remeshing or baking.
+"""Convert GLB files to Unity-friendly FBX files without changing mesh topology or UVs.
 
 The importer keeps the original scene, mesh data, UVs, materials, armatures and
 animations. Images used by node-based materials are written as external PNG
@@ -119,10 +119,8 @@ def save_external_images(folder, texture_format):
         else:
             image.file_format = BLENDER_FORMATS.get(extension, "PNG")
         image.save(filepath=str(target))
-        if image.packed_file:
-            image.unpack(method="USE_LOCAL")
-        # unpack() may restore the GLB's original relative path. Set the
-        # output path again so the FBX exporter references the copied file.
+        # Do not unpack the GLB image: that can write beside the input file.
+        # Point the datablock at the saved copy so FBX uses the output texture.
         image.filepath = str(target)
         records.append({
             "name": image.name,
@@ -165,6 +163,13 @@ def export_file(source_path, args):
         object_types={"EMPTY", "MESH", "ARMATURE"},
         path_mode="RELATIVE",
         embed_textures=False,
+        # Export the imported mesh data directly: don't evaluate modifiers,
+        # subdivide or triangulate it again during FBX export.
+        use_mesh_modifiers=False,
+        use_mesh_modifiers_render=False,
+        use_subsurf=False,
+        use_triangles=False,
+        bake_space_transform=False,
         bake_anim=not args.no_animation,
         bake_anim_use_all_actions=True,
         bake_anim_use_nla_strips=True,

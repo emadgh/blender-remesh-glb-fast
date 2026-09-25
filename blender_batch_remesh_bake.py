@@ -144,6 +144,24 @@ def bake_coverage(source, low, img, extrusion):
         bpy.data.materials.remove(mask_mat)
 
 
+def object_space_dimensions(source):
+    """Return mesh bounds in object space, matching Blender's voxel-size units."""
+    bounds = source.bound_box
+    use_bounds = len(bounds) == 8 and not all(
+        all(component == -1.0 for component in point) for point in bounds
+    )
+    points = bounds if use_bounds else source.data.vertices
+    minima = [float("inf")] * 3
+    maxima = [float("-inf")] * 3
+    for point in points:
+        coordinates = point if use_bounds else point.co
+        for axis in range(3):
+            value = coordinates[axis]
+            minima[axis] = min(minima[axis], value)
+            maxima[axis] = max(maxima[axis], value)
+    return [maxima[axis] - minima[axis] for axis in range(3)]
+
+
 def remesh(source, a):
     low = source.copy()
     low.data = source.data.copy()
@@ -151,10 +169,17 @@ def remesh(source, a):
     low.name = source.name + "_remesh"
     activate(low)
     # Voxel remesh drops all UV and material assignments. Originals stay intact for baking.
+    # Voxel size is in object space, so apply scale only to this disposable copy
+    # before measuring its bounds. The imported source object remains unchanged.
+    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+    bpy.context.view_layer.update()
+    local_dimension = max(object_space_dimensions(low))
+    # Keep world dimensions separate for bake extrusion.
     dimension = max(source.dimensions)
-    if dimension <= 0:
+    if local_dimension <= 0 or dimension <= 0:
         raise ValueError("Zero-size mesh")
-    low.data.remesh_voxel_size = max(dimension * a.voxel_size, 0.000001)
+    voxel_size = max(local_dimension * a.voxel_size, 0.000001)
+    low.data.remesh_voxel_size = voxel_size
     bpy.ops.object.voxel_remesh()
     if not low.data.polygons:
         raise ValueError("Voxel remesh produced an empty mesh; reduce --voxel-size")
@@ -170,7 +195,7 @@ def remesh(source, a):
     bpy.ops.mesh.select_all(action="SELECT")
     bpy.ops.uv.smart_project(island_margin=0.01)
     bpy.ops.object.mode_set(mode="OBJECT")
-    return low, dimension
+    return low, dimension, voxel_size, local_dimension
 
 
 def bake_map(source, low, originals, channel, img, extrusion):
@@ -298,7 +323,7 @@ def process_file(path, a):
             blank.diffuse_color = (0.8, 0.8, 0.8, 1)
             originals = [blank]
             source.data.materials.append(blank)
-        low, dimension = remesh(source, a)
+        low, dimension, voxel_size, local_dimension = remesh(source, a)
         bake_mat = bpy.data.materials.new("Bake Target")
         bake_mat.use_nodes = True
         bake_tex = bake_mat.node_tree.nodes.new("ShaderNodeTexImage")
@@ -331,8 +356,14 @@ def process_file(path, a):
         low.data.materials.clear()
         low.data.materials.append(material_from_images(imgs, transparent))
         lows.append(low)
-        report["objects"].append({"name": source.name, "source_faces": len(source.data.polygons),
-                                  "output_faces": len(low.data.polygons), "texture_prefix": prefix,
+        report["objects"].append({"name": source.name,
+                                  "source_vertices": len(source.data.vertices),
+                                  "source_faces": len(source.data.polygons),
+                                  "output_vertices": len(low.data.vertices),
+                                  "output_faces": len(low.data.polygons),
+                                  "voxel_size_object_space": voxel_size,
+                                  "local_longest_dimension": local_dimension,
+                                  "texture_prefix": prefix,
                                   "transparent": transparent})
     activate(*lows)
     bpy.ops.export_scene.fbx(filepath=str(out / (path.stem + "_remeshed.fbx")),

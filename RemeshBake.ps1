@@ -1,12 +1,12 @@
-Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase,System.Windows.Forms
+﻿Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase,System.Windows.Forms
 
 $xaml = @'
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Title="GLB to FBX • Remesh + Bake" Height="730" Width="850" MinHeight="650" MinWidth="720" WindowStartupLocation="CenterScreen" Background="#F5F5F4" FontFamily="Segoe UI">
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Title="GLB to FBX • Preserve or Remesh" Height="760" Width="850" MinHeight="680" MinWidth="720" WindowStartupLocation="CenterScreen" Background="#F5F5F4" FontFamily="Segoe UI">
   <Grid Margin="22">
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="220"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
     <StackPanel Grid.Row="0" Margin="0,0,0,14">
-      <TextBlock Text="GLB → FBX  |  Remesh + Bake" FontSize="25" FontWeight="SemiBold" Foreground="#171717"/>
-      <TextBlock Text="فایل‌های GLB را اینجا رها کنید؛ خروجی FBX و تکسچرهای مناسب Unity کنار هم ساخته می‌شوند." FontSize="13" Foreground="#555" Margin="0,5,0,0" FlowDirection="RightToLeft" HorizontalAlignment="Left"/>
+      <TextBlock Text="GLB → FBX  |  Preserve mesh + UV" FontSize="25" FontWeight="SemiBold" Foreground="#171717"/>
+      <TextBlock Text="حالت پیش‌فرض مش و UV اصلی را حفظ می‌کند. فقط در صورت نیاز به تغییر مش، Remesh + Bake را انتخاب کنید." FontSize="13" Foreground="#555" Margin="0,5,0,0" FlowDirection="RightToLeft" HorizontalAlignment="Left"/>
     </StackPanel>
     <Border Grid.Row="1" BorderBrush="#B5B5B0" BorderThickness="1" CornerRadius="8" Background="White" AllowDrop="True" Name="DropArea">
       <DockPanel Margin="12">
@@ -31,14 +31,15 @@ $xaml = @'
       <Button Name="BrowseBlender" Grid.Column="2" Content="Browse..." Margin="8,0,0,0"/>
     </Grid>
     <StackPanel Grid.Row="4" Margin="0,0,0,12">
-      <WrapPanel>
+      <CheckBox Name="PreserveSource" Content="Preserve original mesh, UV and materials (no remesh / unwrap)" IsChecked="True" Margin="0,0,0,10"/>
+      <WrapPanel Name="RemeshSettings" IsEnabled="False">
         <StackPanel Width="145" Margin="0,0,12,8"><TextBlock Text="Texture size"/><ComboBox Name="TextureSize" SelectedIndex="1"><ComboBoxItem Content="512"/><ComboBoxItem Content="1024"/><ComboBoxItem Content="2048"/><ComboBoxItem Content="4096"/></ComboBox></StackPanel>
-        <StackPanel Width="145" Margin="0,0,12,8"><TextBlock Text="Voxel size (%)"/><TextBox Name="VoxelSize" Text="0.5"/></StackPanel>
-        <StackPanel Width="145" Margin="0,0,12,8"><TextBlock Text="Decimate (%)"/><TextBox Name="Decimate" Text="100"/></StackPanel>
+        <StackPanel Width="165" Margin="0,0,12,8"><TextBlock Text="Voxel size (% local bounds)" ToolTip="Sets spatial resolution, not an exact vertex count."/><TextBox Name="VoxelSize" Text="0.5"/></StackPanel>
+        <StackPanel Width="145" Margin="0,0,12,8"><TextBlock Text="Decimate (%)" ToolTip="Keeps this fraction of each remeshed mesh; it is not a target vertex count."/><TextBox Name="Decimate" Text="100"/></StackPanel>
         <StackPanel Width="145" Margin="0,0,12,8"><TextBlock Text="Cage extrusion (%)"/><TextBox Name="Cage" Text="2"/></StackPanel>
       </WrapPanel>
       <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-        <Button Name="Start" Content="▶  Remesh + Bake" Padding="20,10" Background="#222" Foreground="White" BorderThickness="0" FontWeight="SemiBold"/>
+        <Button Name="Start" Content="▶  Convert GLB → FBX (preserve mesh + UV)" Padding="20,10" Background="#222" Foreground="White" BorderThickness="0" FontWeight="SemiBold"/>
         <Button Name="Cancel" Content="Cancel" Padding="18,10" Margin="10,0,0,0" IsEnabled="False"/>
         <TextBlock Name="Status" Text="Ready" VerticalAlignment="Center" Margin="14,0,0,0" Foreground="#555"/>
       </StackPanel>
@@ -50,7 +51,7 @@ $xaml = @'
 
 $reader = [System.Xml.XmlNodeReader]::new([xml]$xaml)
 $window = [Windows.Markup.XamlReader]::Load($reader)
-$names = 'DropArea','FilesList','AddFiles','RemoveFiles','ClearFiles','OutputPath','BrowseOutput','BlenderPath','BrowseBlender','TextureSize','VoxelSize','Decimate','Cage','Start','Cancel','Status','Log'
+$names = 'DropArea','FilesList','AddFiles','RemoveFiles','ClearFiles','OutputPath','BrowseOutput','BlenderPath','BrowseBlender','TextureSize','VoxelSize','Decimate','Cage','PreserveSource','RemeshSettings','Start','Cancel','Status','Log'
 foreach ($name in $names) { Set-Variable -Name $name -Value $window.FindName($name) -Scope Script }
 
 $script:queue = [System.Collections.Generic.List[string]]::new()
@@ -60,6 +61,7 @@ $script:logFile = $null
 $script:errorFile = $null
 $script:runFolder = $null
 $script:arguments = @()
+$script:directConversionMode = $true
 $script:current = 0
 $script:failCount = 0
 $OutputPath.Text = [Environment]::GetFolderPath('Desktop')
@@ -80,6 +82,15 @@ function Add-Paths($paths) {
     }
     $Status.Text = "$($script:queue.Count) file(s) ready"
 }
+
+$PreserveSource.Add_Checked({
+    $RemeshSettings.IsEnabled = $false
+    $Start.Content = '▶  Convert GLB → FBX (preserve mesh + UV)'
+})
+$PreserveSource.Add_Unchecked({
+    $RemeshSettings.IsEnabled = $true
+    $Start.Content = '▶  Remesh + Bake (replace mesh + UV)'
+})
 
 $dropHandler = [System.Windows.DragEventHandler]{
     param($sender,$event)
@@ -124,7 +135,11 @@ function Start-Next {
     $script:logOffset = 0
     $script:logFile = Join-Path $script:runFolder ("job_{0}.out.log" -f $script:current)
     $script:errorFile = Join-Path $script:runFolder ("job_{0}.err.log" -f $script:current)
-    $scriptPath = Join-Path $PSScriptRoot 'blender_batch_remesh_bake.py'
+    if ($script:directConversionMode) {
+        $scriptPath = Join-Path $PSScriptRoot 'blender_batch_glb_to_fbx.py'
+    } else {
+        $scriptPath = Join-Path $PSScriptRoot 'blender_batch_remesh_bake.py'
+    }
     $argLine = '-b --python ' + (Quote-Arg $scriptPath) + ' -- --input ' + (Quote-Arg $file) + ' --output ' + (Quote-Arg $OutputPath.Text) + ' ' + ($script:arguments -join ' ')
     $Status.Text = "Processing $($script:current)/$($script:queue.Count): $([IO.Path]::GetFileName($file))"
     $Log.AppendText("`r`n=== $file ===`r`n")
@@ -165,18 +180,26 @@ $Start.Add_Click({
     if ($script:queue.Count -eq 0) { [Windows.MessageBox]::Show('Add at least one GLB file.'); return }
     if (-not (Test-Path -LiteralPath $BlenderPath.Text -PathType Leaf)) { [Windows.MessageBox]::Show('Select blender.exe.'); return }
     if (-not $OutputPath.Text.Trim()) { [Windows.MessageBox]::Show('Select an output folder.'); return }
-    try {
-        $culture = [Globalization.CultureInfo]::InvariantCulture
-        $voxel = [double]::Parse($VoxelSize.Text.Replace(',','.'), $culture) / 100
-        $decimate = [double]::Parse($Decimate.Text.Replace(',','.'), $culture) / 100
-        $cage = [double]::Parse($Cage.Text.Replace(',','.'), $culture) / 100
-        if ($voxel -le 0 -or $voxel -ge 1 -or $decimate -le 0 -or $decimate -gt 1 -or $cage -lt 0) { throw 'Range error' }
-    } catch { [Windows.MessageBox]::Show('Check numeric settings: voxel > 0, decimate 0-100, cage >= 0.'); return }
+    $script:directConversionMode = $PreserveSource.IsChecked -eq $true
+    if (-not $script:directConversionMode) {
+        try {
+            $culture = [Globalization.CultureInfo]::InvariantCulture
+            $voxel = [double]::Parse($VoxelSize.Text.Replace(',','.'), $culture) / 100
+            $decimate = [double]::Parse($Decimate.Text.Replace(',','.'), $culture) / 100
+            $cage = [double]::Parse($Cage.Text.Replace(',','.'), $culture) / 100
+            if ($voxel -le 0 -or $voxel -ge 1 -or $decimate -le 0 -or $decimate -gt 1 -or $cage -lt 0) { throw 'Range error' }
+        } catch { [Windows.MessageBox]::Show('Check numeric settings: voxel > 0, decimate 0-100, cage >= 0.'); return }
+    }
     [IO.Directory]::CreateDirectory($OutputPath.Text) | Out-Null
-    $script:runFolder = Join-Path $OutputPath.Text ("remesh_logs_" + (Get-Date -Format 'yyyyMMdd_HHmmss'))
+    $logPrefix = if ($script:directConversionMode) { 'glb_to_fbx_logs_' } else { 'remesh_logs_' }
+    $script:runFolder = Join-Path $OutputPath.Text ($logPrefix + (Get-Date -Format 'yyyyMMdd_HHmmss'))
     [IO.Directory]::CreateDirectory($script:runFolder) | Out-Null
-    $size = $TextureSize.SelectedItem.Content
-    $script:arguments = @('--texture-size', $size, '--voxel-size', $voxel.ToString($culture), '--decimate-ratio', $decimate.ToString($culture), '--cage-extrusion', $cage.ToString($culture))
+    if ($script:directConversionMode) {
+        $script:arguments = @('--texture-format', 'png')
+    } else {
+        $size = $TextureSize.SelectedItem.Content
+        $script:arguments = @('--texture-size', $size, '--voxel-size', $voxel.ToString($culture), '--decimate-ratio', $decimate.ToString($culture), '--cage-extrusion', $cage.ToString($culture))
+    }
     $script:current = 0; $script:failCount = 0
     $Start.IsEnabled = $false; $Cancel.IsEnabled = $true
     $Log.Clear()

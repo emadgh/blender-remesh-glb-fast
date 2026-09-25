@@ -1,12 +1,16 @@
-# تبدیل GLB به FBX برای Unity URP
+# تبدیل GLB به FBX برای Unity
 
-رابط ویندوزی برای remesh و bake دسته‌ای فایل‌های GLB با Blender 4.3 یا جدیدتر. فایل‌ها را در پنجره بکشید، پوشهٔ مقصد و تنظیمات را انتخاب کنید و اجرا را بزنید. خروجی هر مدل فقط FBX است و تکسچرها در پوشهٔ همان FBX ذخیره می‌شوند.
+رابط ویندوزی برای تبدیل فایل‌های GLB به FBX با Blender 4.3 یا جدیدتر. حالت پیش‌فرض مش و UV اصلی را حفظ می‌کند و تکسچرها را کنار FBX می‌نویسد. حالت اختیاری **Remesh + Bake** عمداً مش را تغییر می‌دهد و UV جدیدی برای تکسچرهای bakeشده می‌سازد.
 
 ## شروع سریع
 
-1. فایل‌های `Launch RemeshBake.vbs`، `RemeshBake.ps1` و `blender_batch_remesh_bake.py` را کنار هم نگه دارید.
+1. فایل‌های `Launch RemeshBake.vbs`، `RemeshBake.ps1`، `blender_batch_glb_to_fbx.py` و `blender_batch_remesh_bake.py` را کنار هم نگه دارید.
 2. `Launch RemeshBake.vbs` را دوبار کلیک کنید.
-3. فایل‌های `.glb` را داخل پنجره رها کنید، مقصد و تنظیمات را انتخاب کنید و **Remesh + Export FBX** را بزنید.
+3. فایل‌های `.glb` را داخل پنجره رها کنید، پوشهٔ مقصد را انتخاب کنید و **Convert GLB → FBX (preserve mesh + UV)** را بزنید.
+
+برای تبدیل مستقیم، گزینهٔ **Preserve original mesh, UV and materials** را روشن بگذارید. فقط وقتی remesh و UV تازه می‌خواهید آن را خاموش کنید؛ در آن حالت تعداد و شکل وجه‌ها و مختصات UV مثل ورودی باقی نمی‌مانند.
+
+در حالت Remesh + Bake، اندازهٔ voxel درصدی از بزرگ‌ترین بُعد bounds محلی مش است. این مقدار رزولوشن مکانی را تعیین می‌کند، نه تعداد رأس هدف؛ بنابراین دو مدل هم‌اندازه با جزئیات سطح یا توپولوژی متفاوت ممکن است تعداد رأس خروجی متفاوتی داشته باشند. **Decimate (%)** هم فقط نسبت کاهش هر مش را تعیین می‌کند و تعداد مشترک نمی‌سازد. در `report.json` تعداد رأس ورودی و خروجی و voxel استفاده‌شده ثبت می‌شود.
 
 اگر Blender در مسیر پیش‌فرض نسخهٔ 4.3 نصب باشد خودکار پیدا می‌شود؛ در غیر این صورت مسیر `blender.exe` را دستی انتخاب کنید.
 
@@ -14,7 +18,7 @@
 
 اگر فقط تبدیل GLB به FBX می‌خواهید، فایل مستقل `Launch GLB to FBX.vbs` را اجرا کنید. این ابزار Remesh، Decimate و Bake انجام نمی‌دهد؛ متریال و UV ورودی را حفظ می‌کند و تکسچرهای استفاده‌شده را کنار FBX آنپک کرده و با لینک نسبی صادر می‌کند. راهنمای کامل در [README-glb-to-fbx-fa.md](README-glb-to-fbx-fa.md) است.
 
-## فایل‌های خروجی تکسچر
+## تکسچرهای خروجی حالت Remesh + Bake
 
 برای هر مش یک UV جدید و این نقشه‌ها ساخته می‌شود:
 
@@ -26,7 +30,7 @@
 
 در Unity برای تکسچر پک‌شده گزینهٔ **sRGB (Color Texture)** را خاموش کنید و آن را به ورودی‌های Metallic و Occlusion متریال URP Lit بدهید. متریال داخل FBX به نقشه‌های Base Color، Metallic، Roughness، Normal و Emission وصل است. اگر Unity متریال FBX را خودکار به URP تبدیل نکرد، Shader آن را روی **Universal Render Pipeline/Lit** بگذارید.
 
-## اجرا از خط فرمان
+## اجرای Remesh + Bake از خط فرمان
 
 ```powershell
 blender -b --python blender_batch_remesh_bake.py -- --input "C:\models" --output "C:\baked" --texture-size 2048
