@@ -10,6 +10,7 @@ import traceback
 from pathlib import Path
 
 import bpy
+from mathutils.bvhtree import BVHTree
 
 
 CHANNELS = {
@@ -19,6 +20,7 @@ CHANNELS = {
     "emission": ("Emission Color", (0.0, 0.0, 0.0, 1.0)),
     "alpha": ("Alpha", (1.0, 1.0, 1.0, 1.0)),
 }
+MAP_OPTIONS = ("basecolor", "metallic", "normal", "roughness", "ao", "emission", "height")
 
 
 def args():
@@ -34,6 +36,9 @@ def args():
                    help="Fraction of each object's longest local dimension")
     p.add_argument("--samples", type=int, default=16)
     p.add_argument("--recursive", action="store_true")
+    p.add_argument("--maps", nargs="*", choices=MAP_OPTIONS,
+                   default=["basecolor", "metallic", "normal"],
+                   help="Texture maps to export; --maps alone exports no textures")
     a = p.parse_args(raw)
     a.input = a.input.resolve()
     a.output = a.output.resolve()
@@ -198,7 +203,112 @@ def remesh(source, a):
     return low, dimension, voxel_size, local_dimension
 
 
+def bake_height(source, low, img, extrusion):
+    """Project high-poly geometry onto low-poly UV texels along low normals.
+
+    Encode signed world-space offset as 0.5 + offset / (2 * ray range).
+    Use evaluated meshes in world space so parent/rotation/scale agree.
+    """
+    radius = max(extrusion, max(source.dimensions) * 0.02, 1e-6)
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    high_eval = source.evaluated_get(depsgraph)
+    low_eval = low.evaluated_get(depsgraph)
+    high_mesh = high_eval.to_mesh()
+    low_mesh = low_eval.to_mesh()
+    try:
+        high_mesh.calc_loop_triangles()
+        low_mesh.calc_loop_triangles()
+        high_points = [high_eval.matrix_world @ vertex.co for vertex in high_mesh.vertices]
+        bvh = BVHTree.FromPolygons(high_points,
+                                  [tuple(t.vertices) for t in high_mesh.loop_triangles],
+                                  all_triangles=True)
+        uv_layer = low_mesh.uv_layers.active
+        if uv_layer is None:
+            raise ValueError("Height bake requires a UV map on the low-poly mesh")
+        width, height = img.size
+        pixels = array('f', [0.5, 0.5, 0.5, 1.0]) * (width * height)
+        covered = bytearray(width * height)
+        world = low_eval.matrix_world
+        normal_matrix = world.to_3x3().inverted().transposed()
+        hits = missed = 0
+        minimum = maximum = 0.0
+        for triangle in low_mesh.loop_triangles:
+            uvs = [uv_layer.data[i].uv for i in triangle.loops]
+            ax, ay = uvs[0].x * width, uvs[0].y * height
+            bx, by = uvs[1].x * width, uvs[1].y * height
+            cx, cy = uvs[2].x * width, uvs[2].y * height
+            denominator = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+            if abs(denominator) < 1e-12:
+                continue
+            vertices = [low_mesh.vertices[i] for i in triangle.vertices]
+            points = [world @ vertex.co for vertex in vertices]
+            normals = [(normal_matrix @ vertex.normal).normalized() for vertex in vertices]
+            smooth = low_mesh.polygons[triangle.polygon_index].use_smooth
+            face_normal = (points[1] - points[0]).cross(points[2] - points[0]).normalized()
+            for y in range(max(0, int(min(ay, by, cy))), min(height, int(max(ay, by, cy)) + 1)):
+                for x in range(max(0, int(min(ax, bx, cx))), min(width, int(max(ax, bx, cx)) + 1)):
+                    px, py = x + 0.5, y + 0.5
+                    a = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) / denominator
+                    b = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) / denominator
+                    c = 1.0 - a - b
+                    if min(a, b, c) < -1e-7:
+                        continue
+                    index = y * width + x
+                    if covered[index]:
+                        continue
+                    position = points[0] * a + points[1] * b + points[2] * c
+                    normal = ((normals[0] * a + normals[1] * b + normals[2] * c).normalized()
+                              if smooth else face_normal)
+                    if normal.length_squared < 1e-12:
+                        missed += 1
+                        continue
+                    offsets = []
+                    for sign in (1.0, -1.0):
+                        location, _, _, _ = bvh.ray_cast(position + normal * (radius * sign),
+                                                         normal * -sign, radius * 2)
+                        if location is not None:
+                            offsets.append((location - position).dot(normal))
+                    if not offsets:
+                        missed += 1
+                        continue
+                    offset = min(offsets, key=abs)
+                    value = max(0.0, min(1.0, 0.5 + offset / (2 * radius)))
+                    pixels[index * 4:index * 4 + 4] = array('f', [value, value, value, 1.0])
+                    covered[index] = 1
+                    hits += 1
+                    minimum, maximum = min(minimum, offset), max(maximum, offset)
+        if not hits:
+            raise ValueError("Height bake found no source surface; increase cage extrusion")
+        # Extend island colors into empty texels to prevent filtering seams.
+        frontier = [i for i, value in enumerate(covered) if value]
+        for _ in range(8):
+            following = []
+            for index in frontier:
+                x, y = index % width, index // width
+                for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    nx, ny = x + dx, y + dy
+                    if 0 <= nx < width and 0 <= ny < height:
+                        neighbor = ny * width + nx
+                        if not covered[neighbor]:
+                            pixels[neighbor * 4:neighbor * 4 + 4] = pixels[index * 4:index * 4 + 4]
+                            covered[neighbor] = 1
+                            following.append(neighbor)
+            frontier = following
+        img.pixels.foreach_set(pixels)
+        print(f"HEIGHT: {hits} projected texels, {missed} missed, range +/-{radius:g}", flush=True)
+        if missed:
+            print("WARNING: Height projection missed texels; consider increasing cage extrusion", flush=True)
+        return {"method": "high_to_low_geometry", "neutral": 0.5,
+                "world_space_range": radius, "min_offset": minimum, "max_offset": maximum,
+                "projected_texels": hits, "missed_texels": missed}
+    finally:
+        high_eval.to_mesh_clear()
+        low_eval.to_mesh_clear()
+
+
 def bake_map(source, low, originals, channel, img, extrusion):
+    if channel == "height":
+        return bake_height(source, low, img, extrusion)
     temporary = []
     if channel in CHANNELS:
         for original in originals:
@@ -242,37 +352,39 @@ def material_from_images(imgs, transparent):
         node.label = key
         return node
 
-    base = tex("basecolor")
-    tree.links.new(base.outputs["Color"], bsdf.inputs["Base Color"])
-    if transparent:
+    if "basecolor" in imgs:
+        base = tex("basecolor")
+        tree.links.new(base.outputs["Color"], bsdf.inputs["Base Color"])
+    if transparent and "basecolor" in imgs:
         tree.links.new(base.outputs["Alpha"], bsdf.inputs["Alpha"])
         mat.surface_render_method = "DITHERED"
     # Keep grayscale maps directly connected to the Principled inputs. This
     # lets FBX export preserve their texture links as individual material maps.
-    rough = tex("roughness")
-    tree.links.new(rough.outputs["Color"], bsdf.inputs["Roughness"])
-    metal = tex("metallic")
-    tree.links.new(metal.outputs["Color"], bsdf.inputs["Metallic"])
-    normal = tex("normal")
-    normal_map = tree.nodes.new("ShaderNodeNormalMap")
-    tree.links.new(normal.outputs["Color"], normal_map.inputs["Color"])
-    tree.links.new(normal_map.outputs["Normal"], bsdf.inputs["Normal"])
-    emission = tex("emission")
-    tree.links.new(emission.outputs["Color"], bsdf.inputs["Emission Color"])
-    bsdf.inputs["Emission Strength"].default_value = 1.0
+    for key, socket in (("roughness", "Roughness"), ("metallic", "Metallic"),
+                        ("emission", "Emission Color")):
+        if key in imgs:
+            tree.links.new(tex(key).outputs["Color"], bsdf.inputs[socket])
+    if "normal" in imgs:
+        normal = tex("normal")
+        normal_map = tree.nodes.new("ShaderNodeNormalMap")
+        tree.links.new(normal.outputs["Color"], normal_map.inputs["Color"])
+        tree.links.new(normal_map.outputs["Normal"], bsdf.inputs["Normal"])
+    bsdf.inputs["Emission Strength"].default_value = 1.0 if "emission" in imgs else 0.0
     return mat
 
 
 def pack_unity_channels(imgs, size, transparent):
     count = size * size
-    def values(key):
+    def values(key, default=0.0):
+        if key not in imgs:
+            return array('f', [default, default, default, 1.0]) * count
         data = array('f', [0.0]) * (count * 4)
         imgs[key].pixels.foreach_get(data)
         return data
     base = values("basecolor")
     alpha = values("alpha") if transparent else None
     coverage = values("coverage") if transparent else None
-    rough = values("roughness")
+    rough = values("roughness", 0.5)
     metal = values("metallic")
     for i in range(count):
         j = i * 4
@@ -283,8 +395,9 @@ def pack_unity_channels(imgs, size, transparent):
             base[j + 3] = alpha[j] if coverage[j] > 0.5 else 1.0
         else:
             base[j + 3] = 1.0
-    imgs["basecolor"].pixels.foreach_set(base)
-    ao = values("ao")
+    if "basecolor" in imgs:
+        imgs["basecolor"].pixels.foreach_set(base)
+    ao = values("ao", 1.0)
     unity_mask = image("unity_metallic_smoothness", size, (0, 1, 0, 0.5), True)
     pixels = array('f', [0.0]) * (count * 4)
     for i in range(count):
@@ -294,7 +407,10 @@ def pack_unity_channels(imgs, size, transparent):
         pixels[j + 2] = 0.0
         pixels[j + 3] = 1.0 - rough[j]
     unity_mask.pixels.foreach_set(pixels)
-    imgs["unity_metallic_smoothness"] = unity_mask
+    if any(key in imgs for key in ("metallic", "roughness", "ao")):
+        imgs["unity_metallic_smoothness"] = unity_mask
+    else:
+        bpy.data.images.remove(unity_mask)
     if transparent:
         for key in ("alpha", "coverage"):
             bpy.data.images.remove(imgs.pop(key))
@@ -316,7 +432,8 @@ def process_file(path, a):
         if source.data.users > 1:
             source.data = source.data.copy()
         originals = [m if m else bpy.data.materials.new("empty_slot") for m in source.data.materials]
-        transparent = any(material_has_transparency(mat) for mat in originals)
+        selected_maps = set(a.maps)
+        transparent = "basecolor" in selected_maps and any(material_has_transparency(mat) for mat in originals)
         # Unassigned material slots still need a source material during channel baking.
         if not originals:
             blank = bpy.data.materials.new("default")
@@ -332,27 +449,46 @@ def process_file(path, a):
         safe_name = source.name.replace('/', '_').replace(chr(92), '_')
         prefix = f"{index:03d}_{safe_name}"
         imgs = {}
-        bake_keys = ["basecolor", "roughness", "metallic", "emission", "ao", "normal"]
+        height_report = None
+        bake_keys = [key for key in MAP_OPTIONS if key in selected_maps]
+        # Unity stores smoothness in Metallic alpha. Keep source roughness even
+        # when the user doesn't request a separate roughness texture.
+        if ("metallic" in selected_maps or "ao" in selected_maps) and "roughness" not in bake_keys:
+            bake_keys.append("roughness")
         if transparent:
             bake_keys.append("alpha")
         for key in bake_keys:
-            fill = CHANNELS[key][1] if key in CHANNELS else ((1, 1, 1, 1) if key == "ao" else (0.5, 0.5, 1, 1))
+            fill = CHANNELS[key][1] if key in CHANNELS else ((1, 1, 1, 1) if key == "ao" else ((0.5, 0.5, 0.5, 1) if key == "height" else (0.5, 0.5, 1, 1)))
             img = image(prefix + "_" + key, a.texture_size, fill,
                         key not in ("basecolor", "emission"),
                         alpha=(transparent or key != "basecolor"))
-            bake_map(source, low, originals, key, img, dimension * a.cage_extrusion)
+            bake_result = bake_map(source, low, originals, key, img, dimension * a.cage_extrusion)
+            if key == "height":
+                height_report = bake_result
             imgs[key] = img
-            if key != "coverage":
-                save_image(img, out / f"{prefix}_{key}.png")
         if transparent:
             coverage = image(prefix + "_coverage", a.texture_size, (0, 0, 0, 0), True)
             bake_coverage(source, low, coverage, dimension * a.cage_extrusion)
             imgs["coverage"] = coverage
         pack_unity_channels(imgs, a.texture_size, transparent)
-        # Re-save base color after alpha was made opaque outside UV islands.
-        save_image(imgs["basecolor"], out / f"{prefix}_basecolor.png")
-        save_image(imgs["unity_metallic_smoothness"],
-                   out / f"{prefix}_unity_metallic_smoothness.png")
+        export_keys = selected_maps | {"unity_metallic_smoothness"}
+        if "roughness" in selected_maps:
+            smoothness = image(prefix + "_smoothness", a.texture_size, (0.5, 0.5, 0.5, 1), True)
+            pixels = array('f', [0.0]) * (a.texture_size * a.texture_size * 4)
+            imgs["roughness"].pixels.foreach_get(pixels)
+            for j in range(0, len(pixels), 4):
+                value = 1.0 - pixels[j]
+                pixels[j:j + 4] = array('f', [value, value, value, 1.0])
+            smoothness.pixels.foreach_set(pixels)
+            imgs["smoothness"] = smoothness
+            export_keys.add("smoothness")
+        for key in export_keys:
+            if key in imgs:
+                save_image(imgs[key], out / f"{prefix}_{key}.png")
+        # Internal roughness used for packing must not become an unselected
+        # external FBX texture reference.
+        if "roughness" not in selected_maps and "roughness" in imgs:
+            bpy.data.images.remove(imgs.pop("roughness"))
         low.data.materials.clear()
         low.data.materials.append(material_from_images(imgs, transparent))
         lows.append(low)
@@ -364,6 +500,8 @@ def process_file(path, a):
                                   "voxel_size_object_space": voxel_size,
                                   "local_longest_dimension": local_dimension,
                                   "texture_prefix": prefix,
+                                  "exported_maps": sorted(key for key in export_keys if key in imgs),
+                                  "height_bake": height_report,
                                   "transparent": transparent})
     activate(*lows)
     bpy.ops.export_scene.fbx(filepath=str(out / (path.stem + "_remeshed.fbx")),

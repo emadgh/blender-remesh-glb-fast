@@ -20,15 +20,19 @@
 
 ## تکسچرهای خروجی حالت Remesh + Bake
 
-برای هر مش یک UV جدید و این نقشه‌ها ساخته می‌شود:
+چک‌باکس‌های Diffuse / Base Color، Metallic و Normal به‌صورت پیش‌فرض روشن هستند. گزینه‌های Roughness / Smoothness، AO، Emission و Height / Displacement خاموش هستند. این تنظیمات برای Remesh + Bake است؛ حالت Preserve تکسچرهای اصلی را حفظ می‌کند. با خاموش کردن همهٔ نقشه‌ها، خروجی بدون فایل تکسچر ساخته می‌شود.
+
+برای هر مش یک UV جدید و نقشه‌های انتخاب‌شده ساخته می‌شود:
 
 - `*_basecolor.png` — رنگ پایه و آلفای اصلی، فقط اگر متریال ورودی واقعاً شفاف باشد.
 - `*_normal.png` — نرمال tangent-space.
 - `*_metallic.png`، `*_roughness.png` و `*_emission.png` — نقشه‌های PBR که به متریال FBX وصل می‌شوند.
 - `*_ao.png` — Ambient Occlusion bakeشده.
+- `*_smoothness.png` — معکوس Roughness؛ همراه گزینهٔ Roughness / Smoothness صادر می‌شود.
+- `*_height.png` — ارتفاع هندسی از سطح high-poly روی UV مش low-poly bake می‌شود و نیازی به تکسچر ارتفاع ورودی ندارد. خاکستری ۰٫۵ یعنی بدون اختلاف؛ روشن‌تر یعنی بیرون و تیره‌تر یعنی داخل. برد پروجکشن برابر بزرگ‌ترِ Cage extrusion و ۲٪ bounds مدل است. تعداد برخورد و عدم برخورد و برد ارتفاع در `report.json` ثبت می‌شود؛ اگر هیچ برخوردی پیدا نشود bake با خطا متوقف می‌شود. این محاسبه روی CPU انجام می‌شود و در رزولوشن بالا زمان بیشتری می‌برد.
 - `*_unity_metallic_smoothness.png` — پک مخصوص URP Lit: کانال R فلزی، G انسداد محیطی، B استفاده‌نشده و A صافی (`1 − Roughness`).
 
-در Unity برای تکسچر پک‌شده گزینهٔ **sRGB (Color Texture)** را خاموش کنید و آن را به ورودی‌های Metallic و Occlusion متریال URP Lit بدهید. متریال داخل FBX به نقشه‌های Base Color، Metallic، Roughness، Normal و Emission وصل است. اگر Unity متریال FBX را خودکار به URP تبدیل نکرد، Shader آن را روی **Universal Render Pipeline/Lit** بگذارید.
+URP Lit از Metallic پشتیبانی می‌کند. برای تکسچر پک‌شده **sRGB** را خاموش کنید و آن را به Metallic بدهید؛ منبع Smoothness را **Metallic Alpha** و ضریب آن را ۱ قرار دهید. اگر AO روشن است، همین تکسچر را به Occlusion بدهید. Roughness برای ساخت Smoothness داخلی bake می‌شود حتی اگر خروجی جداگانه‌اش خاموش باشد. Normal را با نوع **Normal map** وارد کنید. Height در ورودی **Height Map** برای parallax استفاده می‌شود و رأس‌های مش را جابه‌جا نمی‌کند. تنظیم Height و AO در Unity دستی است؛ FBX متریال URP را خودکار تنظیم نمی‌کند.
 
 ## اجرای Remesh + Bake از خط فرمان
 

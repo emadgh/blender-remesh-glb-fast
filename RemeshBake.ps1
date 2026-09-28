@@ -1,7 +1,7 @@
 ﻿Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase,System.Windows.Forms
 
 $xaml = @'
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Title="GLB to FBX • Preserve or Remesh" Height="760" Width="850" MinHeight="680" MinWidth="720" WindowStartupLocation="CenterScreen" Background="#F5F5F4" FontFamily="Segoe UI">
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Title="GLB to FBX • Preserve or Remesh" Height="870" Width="850" MinHeight="820" MinWidth="720" WindowStartupLocation="CenterScreen" Background="#F5F5F4" FontFamily="Segoe UI">
   <Grid Margin="22">
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="220"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
     <StackPanel Grid.Row="0" Margin="0,0,0,14">
@@ -38,6 +38,19 @@ $xaml = @'
         <StackPanel Width="145" Margin="0,0,12,8"><TextBlock Text="Decimate (%)" ToolTip="Keeps this fraction of each remeshed mesh; it is not a target vertex count."/><TextBox Name="Decimate" Text="100"/></StackPanel>
         <StackPanel Width="145" Margin="0,0,12,8"><TextBlock Text="Cage extrusion (%)"/><TextBox Name="Cage" Text="2"/></StackPanel>
       </WrapPanel>
+      <StackPanel Name="TextureSettings" IsEnabled="False">
+        <TextBlock Text="Textures to bake / export (Remesh + Bake)" FontWeight="SemiBold" Margin="0,3,0,6"/>
+        <WrapPanel>
+          <CheckBox Name="MapBasecolor" Content="Diffuse / Base Color" IsChecked="True" Margin="0,0,18,8"/>
+          <CheckBox Name="MapMetallic" Content="Metallic" IsChecked="True" Margin="0,0,18,8" ToolTip="Exports metallic plus a Unity packed map: R = metallic, A = smoothness."/>
+          <CheckBox Name="MapNormal" Content="Normal" IsChecked="True" Margin="0,0,18,8"/>
+          <CheckBox Name="MapRoughness" Content="Roughness / Smoothness" IsChecked="False" Margin="0,0,18,8" ToolTip="Optional separate roughness and smoothness maps. Smoothness = 1 - roughness is also included in the Unity packed map."/>
+          <CheckBox Name="MapAO" Content="AO / Occlusion" IsChecked="False" Margin="0,0,18,8" ToolTip="Bakes ambient occlusion. Unity reads occlusion from the green channel."/>
+          <CheckBox Name="MapEmission" Content="Emission" IsChecked="False" Margin="0,0,18,8"/>
+          <CheckBox Name="MapHeight" Content="Height / Displacement" IsChecked="False" Margin="0,0,18,8" ToolTip="Bakes geometric distance from the high-poly source onto low-poly UVs. Gray 0.5 = no offset; brighter = outward. Cage extrusion controls projection range (minimum 2% of bounds). URP Lit uses this for parallax, not vertex displacement."/>
+        </WrapPanel>
+        <TextBlock Text="Preserve mode keeps original textures. Unity Lit: packed R = Metallic, G = AO, A = Smoothness." TextWrapping="Wrap" FontSize="11" Foreground="#555"/>
+      </StackPanel>
       <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
         <Button Name="Start" Content="▶  Convert GLB → FBX (preserve mesh + UV)" Padding="20,10" Background="#222" Foreground="White" BorderThickness="0" FontWeight="SemiBold"/>
         <Button Name="Cancel" Content="Cancel" Padding="18,10" Margin="10,0,0,0" IsEnabled="False"/>
@@ -51,7 +64,7 @@ $xaml = @'
 
 $reader = [System.Xml.XmlNodeReader]::new([xml]$xaml)
 $window = [Windows.Markup.XamlReader]::Load($reader)
-$names = 'DropArea','FilesList','AddFiles','RemoveFiles','ClearFiles','OutputPath','BrowseOutput','BlenderPath','BrowseBlender','TextureSize','VoxelSize','Decimate','Cage','PreserveSource','RemeshSettings','Start','Cancel','Status','Log'
+$names = 'DropArea','FilesList','AddFiles','RemoveFiles','ClearFiles','OutputPath','BrowseOutput','BlenderPath','BrowseBlender','TextureSize','VoxelSize','Decimate','Cage','PreserveSource','RemeshSettings','TextureSettings','MapBasecolor','MapMetallic','MapNormal','MapRoughness','MapAO','MapEmission','MapHeight','Start','Cancel','Status','Log'
 foreach ($name in $names) { Set-Variable -Name $name -Value $window.FindName($name) -Scope Script }
 
 $script:queue = [System.Collections.Generic.List[string]]::new()
@@ -85,10 +98,12 @@ function Add-Paths($paths) {
 
 $PreserveSource.Add_Checked({
     $RemeshSettings.IsEnabled = $false
+    $TextureSettings.IsEnabled = $false
     $Start.Content = '▶  Convert GLB → FBX (preserve mesh + UV)'
 })
 $PreserveSource.Add_Unchecked({
     $RemeshSettings.IsEnabled = $true
+    $TextureSettings.IsEnabled = $true
     $Start.Content = '▶  Remesh + Bake (replace mesh + UV)'
 })
 
@@ -199,6 +214,10 @@ $Start.Add_Click({
     } else {
         $size = $TextureSize.SelectedItem.Content
         $script:arguments = @('--texture-size', $size, '--voxel-size', $voxel.ToString($culture), '--decimate-ratio', $decimate.ToString($culture), '--cage-extrusion', $cage.ToString($culture))
+        $script:arguments += '--maps'
+        foreach ($entry in @(@('basecolor',$MapBasecolor), @('metallic',$MapMetallic), @('normal',$MapNormal), @('roughness',$MapRoughness), @('ao',$MapAO), @('emission',$MapEmission), @('height',$MapHeight))) {
+            if ($entry[1].IsChecked -eq $true) { $script:arguments += $entry[0] }
+        }
     }
     $script:current = 0; $script:failCount = 0
     $Start.IsEnabled = $false; $Cancel.IsEnabled = $true

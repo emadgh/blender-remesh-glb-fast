@@ -20,15 +20,19 @@ For a dedicated window that always converts without remesh or baking, use `Launc
 
 ## Remesh + Bake output textures
 
-Each remeshed mesh gets its own UV map and texture set:
+Choose the maps using the texture checkboxes. **Diffuse / Base Color, Metallic and Normal** are checked by default. **Roughness / Smoothness, AO, Emission and Height / Displacement** start unchecked. Unchecking all maps exports geometry without texture files. These controls apply to Remesh + Bake; Preserve mode keeps the original textures.
+
+Each remeshed mesh gets its own UV map and selected textures:
 
 - `*_basecolor.png` — Base Color and source Alpha when the input material is actually transparent.
 - `*_normal.png` — tangent-space normal map.
 - `*_metallic.png`, `*_roughness.png`, and `*_emission.png` — individual PBR maps linked to the FBX material.
 - `*_ao.png` — baked ambient occlusion.
+- `*_smoothness.png` — inverse roughness, exported with the Roughness / Smoothness option.
+- `*_height.png` — geometric height baked from the high-poly source onto the low-poly UVs. No source height texture is required. Projection follows low-poly surface normals in world space: gray 0.5 means no offset, brighter means outward, darker means inward. The signed offset is encoded as `0.5 + offset / (2 * range)`. Range is the greater of cage extrusion and 2% of source bounds. Missed projections are logged; zero hits fail the bake rather than exporting a placeholder. Eight pixels of island padding reduce filtering seams. `report.json` records the range, offsets and hit/miss counts. This CPU projection can take longer at large texture resolutions.
 - `*_unity_metallic_smoothness.png` — packed for URP Lit: R=Metallic, G=Occlusion, B=unused, A=Smoothness (1 − Roughness).
 
-Set the packed Unity map's **sRGB (Color Texture)** option off when importing. Assign it to the URP Lit Metallic and Occlusion map inputs; Unity reads the appropriate channels. The FBX retains a PBR material with direct links to Base Color, Metallic, Roughness, Normal, and Emission textures. AO is provided separately and in the Unity packed map. Unity may import the FBX material under a different shader; use **Universal Render Pipeline/Lit** if the project does not automatically upgrade it.
+URP Lit supports metallic. Set the packed Unity map's **sRGB (Color Texture)** option off when importing. Assign it to Metallic, choose **Metallic Alpha** as the smoothness source and set the smoothness multiplier to 1. If AO is selected, assign the same packed map to Occlusion. Source roughness is baked internally for packing even when its separate export is unchecked; absent AO uses white. Import Normal as **Normal map**. Height goes into **Height Map** for parallax, not mesh vertex displacement. Height and AO need manual assignment; FBX does not automatically configure a URP Lit material. Use **Universal Render Pipeline/Lit** with the Metallic workflow.
 
 ## Run Remesh + Bake from command line
 
@@ -36,4 +40,4 @@ Set the packed Unity map's **sRGB (Color Texture)** option off when importing. A
 blender -b --python blender_batch_remesh_bake.py -- --input "C:\models" --output "C:\baked" --texture-size 2048
 ```
 
-Use `--recursive` to include subfolders. See `--help` for all remesh options.
+Use `--maps basecolor metallic normal ao emission` to select maps, or `--maps` alone for no textures. Defaults are basecolor, metallic and normal. Use `--recursive` to include subfolders. See `--help` for all remesh options.
