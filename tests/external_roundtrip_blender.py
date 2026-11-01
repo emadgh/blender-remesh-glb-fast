@@ -34,7 +34,8 @@ bpy.context.view_layer.update()
 world_vertices = [source.matrix_world @ vertex.co for vertex in source.data.vertices]
 settings = SimpleNamespace(remesher='external', external_remesher=root / 'autoremesher/autoremesher.exe',
                            target_quads=100, voxel_size=0.01, decimate_ratio=1,
-                           cage_extrusion=0.02, texture_size=16, samples=1)
+                           cage_extrusion=0.02, texture_size=16, samples=1,
+                           maps=['basecolor', 'metallic', 'normal', 'roughness', 'ao', 'emission'])
 low, dimension, voxel, local_dimension = pipeline.remesh(source, settings)
 bpy.context.view_layer.update()
 if '--real' not in sys.argv:
@@ -52,5 +53,5 @@ with tempfile.TemporaryDirectory(prefix='external_bake_test_') as temporary:
     settings.output = temporary / 'output'
     pipeline.process_file(glb, settings)
     assert (settings.output / 'sample/sample_remeshed.fbx').is_file()
-    assert len(list((settings.output / 'sample').glob('*.png'))) == 7
+    assert len(list((settings.output / 'sample').glob('*.png'))) == 8
 print('PASS: OBJ world coordinates, UV unwrap, texture bake and FBX export')
