@@ -17,6 +17,7 @@ import traceback
 from pathlib import Path
 
 import bpy
+from mathutils import Matrix, Vector
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff", ".exr", ".hdr", ".webp"}
@@ -137,12 +138,124 @@ def imported_objects():
     return [obj for obj in bpy.context.scene.objects if obj.type in allowed]
 
 
+def base_color_uv(material):
+    """Find the UV map driving the visible base-color image, if explicit."""
+    if not material or not material.use_nodes:
+        return None
+    tree = material.node_tree
+    for shader in (node for node in tree.nodes if node.type == 'BSDF_PRINCIPLED'):
+        color = shader.inputs.get('Base Color')
+        if not color or not color.is_linked:
+            continue
+        texture = color.links[0].from_node
+        if texture.type != 'TEX_IMAGE':
+            continue
+        vector = texture.inputs.get('Vector')
+        if not vector or not vector.is_linked:
+            continue
+        mapping = vector.links[0].from_node
+        if mapping.type == 'MAPPING':
+            vector = mapping.inputs.get('Vector')
+            if not vector or not vector.is_linked:
+                continue
+            mapping = vector.links[0].from_node
+        if mapping.type == 'UVMAP':
+            return mapping.uv_map
+    return None
+
+
+def base_color_transform(material):
+    """Return the static glTF texture transform feeding Base Color."""
+    if not material or not material.use_nodes:
+        return None
+    for shader in (node for node in material.node_tree.nodes if node.type == 'BSDF_PRINCIPLED'):
+        color = shader.inputs.get('Base Color')
+        if not color or not color.is_linked:
+            continue
+        texture = color.links[0].from_node
+        if texture.type != 'TEX_IMAGE' or not texture.inputs['Vector'].is_linked:
+            continue
+        mapping = texture.inputs['Vector'].links[0].from_node
+        if mapping.type != 'MAPPING' or mapping.vector_type != 'POINT':
+            continue
+        location = tuple(mapping.inputs['Location'].default_value)
+        rotation = tuple(mapping.inputs['Rotation'].default_value)
+        scale = tuple(mapping.inputs['Scale'].default_value)
+        if any(mapping.inputs[key].is_linked for key in ('Location', 'Rotation', 'Scale')):
+            raise ValueError(f'Animated/linked Base Color texture transform in {material.name} cannot be baked into static UVs')
+        matrix = (Matrix.Translation(Vector(location)) @
+                  Matrix.Rotation(rotation[2], 4, 'Z') @
+                  Matrix.Diagonal(Vector((scale[0], scale[1], 1, 1))))
+        return matrix
+    return None
+
+
+def keep_one_texture_uv(obj):
+    """Keep only the base-color UV; Unity FBX materials sample UV channel 0."""
+    layers = obj.data.uv_layers
+    names = [layer.name for layer in layers]
+    requested = {name for material in obj.data.materials
+                 if (name := base_color_uv(material)) and name in names}
+    used = set()
+    for material in obj.data.materials:
+        if not material or not material.use_nodes:
+            continue
+        for texture in (node for node in material.node_tree.nodes if node.type == 'TEX_IMAGE'):
+            vector = texture.inputs.get('Vector')
+            if vector and vector.is_linked and vector.links[0].from_node.type == 'UVMAP':
+                name = vector.links[0].from_node.uv_map
+                if name in names:
+                    used.add(name)
+    if len(requested) > 1:
+        raise ValueError(f'Conflicting base-color UV sets on {obj.name}: {sorted(requested)}. A single UV cannot represent both.')
+    warning = None
+    if len(used) > 1:
+        warning = (f'Multiple texture UV sets on {obj.name}: {sorted(used)}. '
+                   'The output uses Base Color UV for every texture; other maps may need rebaking.')
+    if not names:
+        return warning, None
+    chosen = next(iter(requested)) if requested else names[0]
+    transforms = [base_color_transform(material) for material in obj.data.materials
+                  if material and material.use_nodes]
+    matrices = [matrix if matrix is not None else Matrix.Identity(4) for matrix in transforms]
+    if matrices and any(any(abs(matrices[0][row][col] - matrix[row][col]) > 1e-6
+                            for row in range(4) for col in range(4)) for matrix in matrices[1:]):
+        raise ValueError(f'Conflicting Base Color texture transforms on {obj.name}; cannot use one UV for all materials')
+    # If there was no explicit base-color UV, glTF uses TEXCOORD_0.
+    for layer in list(layers):
+        if layer.name != chosen:
+            layers.remove(layer)
+    layers.active = layers[0]
+    layers.active_index = 0
+    if transforms and transforms[0] is not None:
+        matrix = transforms[0]
+        for loop in layers[0].data:
+            transformed = matrix @ Vector((loop.uv.x, loop.uv.y, 0, 1))
+            loop.uv = transformed.x, transformed.y
+        print(f'UV transform baked into {obj.name}: {chosen}', flush=True)
+    print(f'UV0 {obj.name}: {chosen} (one UV layer)', flush=True)
+    return warning, chosen
+
+
 def export_file(source_path, args):
     bpy.ops.wm.read_factory_settings(use_empty=True)
     bpy.ops.import_scene.gltf(filepath=str(source_path))
     objects = imported_objects()
     if not objects or not any(obj.type == "MESH" for obj in objects):
         raise ValueError("No mesh in GLB")
+
+    # Mesh data may be shared between objects; make UV selection local to each.
+    warnings = []
+    uv_selection = {}
+    for obj in objects:
+        if obj.type == 'MESH':
+            if obj.data.users > 1:
+                obj.data = obj.data.copy()
+            warning, selected_uv = keep_one_texture_uv(obj)
+            uv_selection[obj.name] = selected_uv
+            if warning:
+                warnings.append(warning)
+                print(f'WARNING {warning}', flush=True)
 
     output_dir = args.output / source_path.stem
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -186,6 +299,8 @@ def export_file(source_path, args):
         "textures": texture_records,
         "objects": [{"name": obj.name, "type": obj.type} for obj in objects],
         "animation_exported": not args.no_animation,
+        "warnings": warnings,
+        "uv0_by_object": uv_selection,
     }
     (output_dir / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"FBX {fbx_path}", flush=True)

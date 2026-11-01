@@ -33,6 +33,8 @@ $xaml = @'
     <StackPanel Grid.Row="4" Margin="0,0,0,12">
       <CheckBox Name="PreserveSource" Content="Preserve original mesh, UV and materials (no remesh / unwrap)" IsChecked="True" Margin="0,0,0,10"/>
       <WrapPanel Name="RemeshSettings" IsEnabled="False">
+        <StackPanel Width="220" Margin="0,0,12,8"><TextBlock Text="Remesher"/><ComboBox Name="Remesher" SelectedIndex="0"><ComboBoxItem Content="Blender voxel" Tag="blender"/><ComboBoxItem Content="External — AutoRemesher" Tag="external"/></ComboBox></StackPanel>
+        <StackPanel Width="145" Margin="0,0,12,8"><TextBlock Text="Target quads / mesh"/><TextBox Name="TargetQuads" Text="5000" IsEnabled="False"/></StackPanel>
         <StackPanel Width="145" Margin="0,0,12,8"><TextBlock Text="Texture size"/><ComboBox Name="TextureSize" SelectedIndex="1"><ComboBoxItem Content="512"/><ComboBoxItem Content="1024"/><ComboBoxItem Content="2048"/><ComboBoxItem Content="4096"/></ComboBox></StackPanel>
         <StackPanel Width="165" Margin="0,0,12,8"><TextBlock Text="Voxel size (% local bounds)" ToolTip="Sets spatial resolution, not an exact vertex count."/><TextBox Name="VoxelSize" Text="0.5"/></StackPanel>
         <StackPanel Width="145" Margin="0,0,12,8"><TextBlock Text="Decimate (%)" ToolTip="Keeps this fraction of each remeshed mesh; it is not a target vertex count."/><TextBox Name="Decimate" Text="100"/></StackPanel>
@@ -53,6 +55,12 @@ $reader = [System.Xml.XmlNodeReader]::new([xml]$xaml)
 $window = [Windows.Markup.XamlReader]::Load($reader)
 $names = 'DropArea','FilesList','AddFiles','RemoveFiles','ClearFiles','OutputPath','BrowseOutput','BlenderPath','BrowseBlender','TextureSize','VoxelSize','Decimate','Cage','PreserveSource','RemeshSettings','Start','Cancel','Status','Log'
 foreach ($name in $names) { Set-Variable -Name $name -Value $window.FindName($name) -Scope Script }
+foreach ($name in @('Remesher','TargetQuads')) { Set-Variable -Name $name -Value $window.FindName($name) -Scope Script }
+$Remesher.Add_SelectionChanged({
+    $external = $Remesher.SelectedItem.Tag -eq 'external'
+    $VoxelSize.IsEnabled = -not $external
+    $TargetQuads.IsEnabled = $external
+})
 
 $script:queue = [System.Collections.Generic.List[string]]::new()
 $script:job = $null
@@ -124,6 +132,12 @@ $BrowseBlender.Add_Click({
 })
 
 function Quote-Arg([string]$value) { return '"' + $value.Replace('"','\"') + '"' }
+function Stop-Conversion {
+    if ($script:job -and -not $script:job.HasExited) {
+        # Include the AutoRemesher child process in cancellation.
+        Start-Process -FilePath 'taskkill.exe' -ArgumentList @('/PID', $script:job.Id, '/T', '/F') -WindowStyle Hidden -Wait
+    }
+}
 function Start-Next {
     if ($script:current -ge $script:queue.Count) {
         $Start.IsEnabled = $true; $Cancel.IsEnabled = $false
@@ -187,6 +201,8 @@ $Start.Add_Click({
             $voxel = [double]::Parse($VoxelSize.Text.Replace(',','.'), $culture) / 100
             $decimate = [double]::Parse($Decimate.Text.Replace(',','.'), $culture) / 100
             $cage = [double]::Parse($Cage.Text.Replace(',','.'), $culture) / 100
+            $quads = [int]::Parse($TargetQuads.Text, $culture)
+            if ($quads -lt 1) { throw 'Target quads must be positive' }
             if ($voxel -le 0 -or $voxel -ge 1 -or $decimate -le 0 -or $decimate -gt 1 -or $cage -lt 0) { throw 'Range error' }
         } catch { [Windows.MessageBox]::Show('Check numeric settings: voxel > 0, decimate 0-100, cage >= 0.'); return }
     }
@@ -199,6 +215,9 @@ $Start.Add_Click({
     } else {
         $size = $TextureSize.SelectedItem.Content
         $script:arguments = @('--texture-size', $size, '--voxel-size', $voxel.ToString($culture), '--decimate-ratio', $decimate.ToString($culture), '--cage-extrusion', $cage.ToString($culture))
+        if ($Remesher.SelectedItem.Tag -eq 'external') {
+            $script:arguments += @('--remesher', 'external', '--target-quads', $quads.ToString($culture))
+        }
     }
     $script:current = 0; $script:failCount = 0
     $Start.IsEnabled = $false; $Cancel.IsEnabled = $true
@@ -206,9 +225,9 @@ $Start.Add_Click({
     Start-Next
 })
 $Cancel.Add_Click({
-    if ($script:job -and -not $script:job.HasExited) { $script:job.Kill() }
+    Stop-Conversion
     $script:current = $script:queue.Count
     $Status.Text = 'Cancelled'
 })
-$window.Add_Closing({ if ($script:job -and -not $script:job.HasExited) { $script:job.Kill() } })
+$window.Add_Closing({ Stop-Conversion })
 [void]$window.ShowDialog()

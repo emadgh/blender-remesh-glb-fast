@@ -7,9 +7,12 @@ from array import array
 import json
 import sys
 import traceback
+import tempfile
 from pathlib import Path
 
 import bpy
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from external_remesher import run_remesher
 
 
 CHANNELS = {
@@ -34,9 +37,14 @@ def args():
                    help="Fraction of each object's longest local dimension")
     p.add_argument("--samples", type=int, default=16)
     p.add_argument("--recursive", action="store_true")
+    p.add_argument('--remesher', choices=('blender', 'external'), default='blender')
+    p.add_argument('--external-remesher', type=Path, default=Path(__file__).resolve().parent / 'autoremesher' / 'autoremesher.exe')
+    p.add_argument('--target-quads', type=int, default=5000)
     a = p.parse_args(raw)
     a.input = a.input.resolve()
     a.output = a.output.resolve()
+    if a.target_quads < 1:
+        p.error('Target quads must be positive')
     if a.texture_size < 16 or not 0 < a.voxel_size < 1 or not 0 < a.decimate_ratio <= 1:
         p.error("Invalid texture size, voxel size or decimate ratio")
     return a
@@ -180,9 +188,34 @@ def remesh(source, a):
         raise ValueError("Zero-size mesh")
     voxel_size = max(local_dimension * a.voxel_size, 0.000001)
     low.data.remesh_voxel_size = voxel_size
-    bpy.ops.object.voxel_remesh()
+    if a.remesher == 'external':
+        # OBJ round trip uses world coordinates with identical export/import
+        # axes. The source and its material graph remain available for baking.
+        with tempfile.TemporaryDirectory(prefix='glb_autoremesh_') as temporary:
+            incoming = Path(temporary) / 'input.obj'
+            outgoing = Path(temporary) / 'remeshed.obj'
+            bpy.ops.wm.obj_export(filepath=str(incoming), export_selected_objects=True,
+                                  export_materials=False, export_uv=False,
+                                  export_triangulated_mesh=True, forward_axis='Y', up_axis='Z')
+            run_remesher(a.external_remesher, incoming, outgoing, a.target_quads)
+            before = set(bpy.context.scene.objects)
+            bpy.ops.wm.obj_import(filepath=str(outgoing), forward_axis='Y', up_axis='Z')
+            imported = [o for o in bpy.context.scene.objects if o not in before and o.type == 'MESH']
+            if not imported:
+                raise ValueError('AutoRemesher OBJ contains no mesh')
+            activate(*imported)
+            if len(imported) > 1:
+                bpy.ops.object.join()
+            result = bpy.context.view_layer.objects.active
+            bpy.data.objects.remove(low, do_unlink=True)
+            low = result
+            low.name = source.name + '_remesh'
+            activate(low)
+        voxel_size = None
+    else:
+        bpy.ops.object.voxel_remesh()
     if not low.data.polygons:
-        raise ValueError("Voxel remesh produced an empty mesh; reduce --voxel-size")
+        raise ValueError('Remesher produced an empty mesh')
     if a.decimate_ratio < 1:
         mod = low.modifiers.new("Reduce", "DECIMATE")
         mod.ratio = a.decimate_ratio
@@ -311,7 +344,7 @@ def process_file(path, a):
     out = a.output / path.stem
     out.mkdir(parents=True, exist_ok=True)
     lows = []
-    report = {"source": str(path), "objects": []}
+    report = {"source": str(path), "remesher": a.remesher, "target_quads": a.target_quads if a.remesher == 'external' else None, "objects": []}
     for index, source in enumerate(sources):
         if source.data.users > 1:
             source.data = source.data.copy()
